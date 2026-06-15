@@ -1,0 +1,29 @@
+{
+  "name": "weathervane",
+  "version": "0.1.0",
+  "description": "Tracks everything, sends nothing. Lightweight, cookie-free, zero-backend analytics — pageviews, content exposure, clicks, forms, sessions, and web vitals emitted as structured browser CustomEvents you can forward anywhere.",
+  "author": "Alec Rothman",
+  "license": "MIT",
+  "main": "weathervane.js",
+  "browser": "weathervane.js",
+  "files": [
+    "weathervane.js",
+    "weathervane.min.js",
+    "weathervane.min.js.gz",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "npx terser weathervane.js --compress --mangle -o weathervane.min.js && gzip -9 -kf weathervane.min.js",
+    "demo": "python3 -m http.server 4173"
+  },
+  "keywords": [
+    "analytics",
+    "tracking",
+    "events",
+    "custom-events",
+    "web-vitals",
+    "privacy",
+    "cookie-free",
+    "lightweight"
+  ]
+}
