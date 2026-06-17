@@ -64,7 +64,7 @@ This emits `content_serve` when the element enters the DOM, then `content_view` 
 - 🍪 **Zero cookies** — client & session IDs in `localStorage` (in-memory fallback); nothing for a cookie banner to announce
 - 👁️ **Cumulative, pause-aware exposure** — IntersectionObserver-based timing that handles tab switches, scroll-aways, and content taller than the viewport
 - 🌒 **Shadow DOM support** — tracks content, clicks, and forms inside open shadow roots (web components)
-- 🔗 **Form intent tracking** — `form_engage`, `form_submit`, and `form_abandon` with engagement timing
+- 🔗 **Form intent tracking** — `form_engage` on first focus, `form_submit` with completion time, `form_abandon` when users leave without submitting (3-second inactivity timer, resets on re-focus)
 - 📊 **Web vitals** — FCP, LCP, CLS, and FID included on every payload
 - 📱 **SPA-ready** — automatic `pageview_dynamic` for pushState / replaceState / popstate / hashchange
 - 📏 **Per-content scroll depth** — tracks how far users scroll through each content block (0-100%)
@@ -313,7 +313,7 @@ Every event's `detail` has the same structure:
 - `link_click` — any `<a href>` click; includes `url`, `text`, `target`, `link_type` (web/email/phone), `is_external`
 - `form_engage` — user focused on a form field for the first time; includes form metadata
 - `form_submit` — any form submission; includes form metadata and `completion_time`
-- `form_abandon` — user engaged with a form for 3+ seconds and left without submitting (fires on `pagehide`, `visibilitychange`, or SPA navigation); includes `engagement_time`
+- `form_abandon` — user engaged with a form, then left focus for 3+ seconds without returning or submitting; also fires on page hide, tab switch, or SPA navigation; includes `engagement_time`
 
 **User events**
 - `user_identify` — fired by `setUserId()`
@@ -375,6 +375,8 @@ All optional; they enrich `form_engage` / `form_submit` / `form_abandon` events:
 ```
 
 The `data-vane-form` attribute sets the form name (falls back to `name`, then `id`, then `'unnamed'`).
+
+**Abandon detection:** When a user focuses a form field and then clicks outside the form, a 3-second timer starts. If they don't return, `form_abandon` fires with `engagement_time`. Re-focusing the form cancels the timer. Abandonment also fires immediately on page hide, tab switch, or SPA navigation.
 
 Weathervane never reads or emits **field values** — only metadata (field count, types, required/optional counts).
 
@@ -471,7 +473,7 @@ myRouter.on('change', () => vane.trackPageView());
 
 ## 🚀 Demo
 
-Open [demo/index.html](demo/index.html) via any static server for a live, real-time event
+[Check out the demo/](https://alecatwork.com/weathervane/demo) for a live, real-time event
 console next to a full test matrix:
 
 - **Part 1 — Light DOM:** content exposure (including the tall-content 65% rule), forms with
@@ -484,9 +486,6 @@ console next to a full test matrix:
 
 Each block lists the events it should emit, so you can verify behavior against expectations:
 
-```bash
-npm run demo        # serves the repo at http://localhost:4173 → open /demo/
-```
 
 ## 🌐 Browser Support
 
@@ -502,7 +501,7 @@ Logs every emitted event to the console. Common gotchas:
 
 - **Listener attached too late?** The initial `pageview` fires on DOM ready — use `vane.on('*', cb, { replay: true })` or `vane.getHistory()` to catch up.
 - **Content not viewing?** Check the element is actually visible and meets the exposure time; tall elements need to fill 65% of the viewport.
-- **No `form_abandon`?** It requires 3+ seconds of engagement and fires on `pagehide`, `visibilitychange` (tab switch), or SPA navigation — not on blur.
+- **No `form_abandon`?** It fires 3 seconds after focus leaves the form (if user doesn't return). Also fires immediately on page hide, tab switch, or SPA navigation. Re-focusing the form resets the timer.
 - **Web component not tracked?** Only *open* shadow roots are trackable; closed roots are invisible by design.
 
 ## License

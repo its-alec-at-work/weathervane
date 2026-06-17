@@ -873,12 +873,46 @@
   }
 
   function onFocusIn(e) {
-    var field = eventPath(e)[0];
+    var field = e.target;
     if (!field || field.nodeType !== 1 || !field.form) return;
-    if (!formEngagement.has(field.form)) {
-      formEngagement.set(field.form, { start: now() });
-      emit('form_engage', formProps(field.form));
+    var form = field.form;
+    var engagement = formEngagement.get(form);
+    if (engagement) {
+      // Clear any pending abandon timer when focus returns
+      if (engagement.abandonTimer) {
+        clearTimeout(engagement.abandonTimer);
+        engagement.abandonTimer = null;
+      }
+    } else {
+      formEngagement.set(form, { start: now(), abandonTimer: null });
+      emit('form_engage', formProps(form));
     }
+  }
+
+  function onFocusOut(e) {
+    var field = e.target;
+    if (!field || field.nodeType !== 1 || !field.form) return;
+    var form = field.form;
+    var engagement = formEngagement.get(form);
+    if (!engagement) return;
+    // Use setTimeout to check if focus moved to another field in same form
+    setTimeout(function () {
+      // If focus is still inside the form, don't start abandon timer
+      var active = document.activeElement;
+      if (active && active.form === form) return;
+      // Start abandon timer
+      if (!engagement.abandonTimer) {
+        engagement.abandonTimer = setTimeout(function () {
+          // Re-check engagement still exists (might have been submitted or refocused)
+          if (!formEngagement.has(form)) return;
+          var engagementTime = now() - engagement.start;
+          if (engagementTime >= config.formAbandonThreshold) {
+            emit('form_abandon', assign(formProps(form), { engagement_time: engagementTime }));
+          }
+          formEngagement.delete(form);
+        }, config.formAbandonThreshold);
+      }
+    }, 50);
   }
 
   function onSubmit(e) {
@@ -887,6 +921,7 @@
     var props = formProps(form);
     var engagement = formEngagement.get(form);
     if (engagement) {
+      if (engagement.abandonTimer) clearTimeout(engagement.abandonTimer);
       props.completion_time = now() - engagement.start;
       formEngagement.delete(form);
     }
@@ -896,6 +931,7 @@
   function flushFormAbandons() {
     if (!config.enableFormTracking) return;
     formEngagement.forEach(function (engagement, form) {
+      if (engagement.abandonTimer) clearTimeout(engagement.abandonTimer);
       var engagementTime = now() - engagement.start;
       if (engagementTime >= config.formAbandonThreshold) {
         emit('form_abandon', assign(formProps(form), { engagement_time: engagementTime }));
@@ -926,6 +962,7 @@
     listen(document, 'click', onClick, true);
     if (config.enableFormTracking) {
       listen(document, 'focusin', onFocusIn, true);
+      listen(document, 'focusout', onFocusOut, true);
       listen(document, 'submit', onSubmit, true);
       listen(window, 'pagehide', flushFormAbandons);
       listen(document, 'visibilitychange', function () {
