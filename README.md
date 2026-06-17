@@ -473,7 +473,7 @@ myRouter.on('change', () => vane.trackPageView());
 
 ## 🚀 Demo
 
-[Check out the demo/](https://alecatwork.com/weathervane/demo) for a live, real-time event
+[Check out the demo](https://alecatwork.com/weathervane/demo) for a live, real-time event
 console next to a full test matrix:
 
 - **Part 1 — Light DOM:** content exposure (including the tall-content 65% rule), forms with
