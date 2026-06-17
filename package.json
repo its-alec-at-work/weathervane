@@ -1,9 +1,17 @@
 {
   "name": "weathervane",
-  "version": "0.1.0",
-  "description": "Tracks everything, sends nothing. Lightweight, cookie-free, zero-backend analytics — pageviews, content exposure, clicks, forms, sessions, and web vitals emitted as structured browser CustomEvents you can forward anywhere.",
+  "version": "0.5.0",
+  "description": "The open analytics layer that sends nothing. Zero-backend behavioral telemetry — pageviews, content exposure, clicks, forms, sessions, and web vitals emitted as structured CustomEvents you forward anywhere.",
   "author": "Alec Rothman",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/its-alec-at-work/weathervane.git"
+  },
+  "homepage": "https://github.com/its-alec-at-work/weathervane#readme",
+  "bugs": {
+    "url": "https://github.com/its-alec-at-work/weathervane/issues"
+  },
   "main": "weathervane.js",
   "browser": "weathervane.js",
   "files": [

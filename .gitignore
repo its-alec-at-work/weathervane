@@ -19,7 +19,13 @@ npm-debug.log*
 # Build artifacts (keep weathervane.min.js - it's checked in)
 *.tgz
 
+# AI
+/.claude
 IDEAS_FOR_IMPROVEMENTS.md
 SDK_DETAILS.md
-/.claude
+
+# other
 index.html
+*.txt
+/other
+*.svg

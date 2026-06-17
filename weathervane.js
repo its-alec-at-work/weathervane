@@ -99,17 +99,18 @@
       '-' + hex.slice(16, 20) + '-' + hex.slice(20);
   }
 
-  // ULID — lexicographically sortable event ids for time-series friendliness
-  var ULID_CHARS = '0123456789ABCDEFGHJKMNPQRSTVWXYZ';
-  function ulid() {
+  // Sortable ID — lexicographically sortable event ids for time-series friendliness
+  // (ULID-like: 10-char timestamp prefix + 16 random chars in Crockford base32)
+  var SORTABLE_CHARS = '0123456789ABCDEFGHJKMNPQRSTVWXYZ';
+  function sortableId() {
     var ts = now();
     var out = '';
     for (var i = 0; i < 10; i++) {
-      out = ULID_CHARS[ts % 32] + out;
+      out = SORTABLE_CHARS[ts % 32] + out;
       ts = Math.floor(ts / 32);
     }
     var rand = randomBytes(16);
-    for (var j = 0; j < 16; j++) out += ULID_CHARS[rand[j] % 32];
+    for (var j = 0; j < 16; j++) out += SORTABLE_CHARS[rand[j] % 32];
     return out;
   }
 
@@ -385,6 +386,8 @@
       ? Math.min(100, Math.round((window.scrollY / scrollable) * 100))
       : 100;
     if (pct > scrollDepth) scrollDepth = pct;
+    // Also update per-content scroll depths
+    if (config.enableContentTracking) updateContentScrollDepths();
   }
 
   function observeScroll() {
@@ -404,7 +407,7 @@
 
   function buildPayload(eventName, properties) {
     return {
-      event_id: ulid(),
+      event_id: sortableId(),
       event_name: eventName,
       timestamp: new Date().toISOString(),
       client_id: clientId,
@@ -516,8 +519,31 @@
       segment: state.segment,
       content_instance: state.instanceId,
       content_depth: contentDepth(el),
-      exposure_limit: state.exposureLimit
+      exposure_limit: state.exposureLimit,
+      content_scroll_depth: state.scrollDepth
     };
+  }
+
+  // Calculate how far user has scrolled through a content element (0-100)
+  function calcContentScrollDepth(el) {
+    var rect = el.getBoundingClientRect();
+    var viewportHeight = window.innerHeight;
+    // Content hasn't reached top of viewport yet
+    if (rect.top >= viewportHeight) return 0;
+    // Content has scrolled completely past
+    if (rect.bottom <= 0) return 100;
+    // Calculate progress: how much of content is above viewport top
+    var scrolledPast = Math.max(0, -rect.top);
+    var contentHeight = rect.height;
+    if (contentHeight <= 0) return 0;
+    return Math.min(100, Math.round((scrolledPast / contentHeight) * 100));
+  }
+
+  function updateContentScrollDepths() {
+    contentStates.forEach(function (state, el) {
+      var depth = calcContentScrollDepth(el);
+      if (depth > state.scrollDepth) state.scrollDepth = depth;
+    });
   }
 
   // The composed event path lets delegated handlers see through open shadow
@@ -559,14 +585,17 @@
       accumulated: 0,
       visibleSince: null,
       resumeOnShow: false,
-      timer: null
+      timer: null,
+      scrollDepth: 0 // max scroll depth within this content (0-100)
     };
     contentStates.set(el, state);
     emit('content_serve', contentProps(el, state));
     if (intersectionObserver) intersectionObserver.observe(el);
   }
 
-  function scanContent(root) {
+  // scanContent: skipShadowScan=true for mutation-triggered scans since
+  // attachShadow patch + template removal watcher already catch new roots
+  function scanContent(root, skipShadowScan) {
     if (!root) root = document;
     if (root.nodeType === 1) {
       if (config.enableContentTracking && root.hasAttribute('data-vane-content')) {
@@ -579,7 +608,9 @@
       var els = root.querySelectorAll('[data-vane-content]');
       for (var i = 0; i < els.length; i++) registerContent(els[i]);
     }
-    if (config.trackShadowDom) {
+    // Full shadow root scan only on initial load; mutations are caught by
+    // attachShadow patch and declarative template removal watcher
+    if (config.trackShadowDom && !skipShadowScan) {
       var all = root.querySelectorAll('*');
       for (var j = 0; j < all.length; j++) {
         if (all[j].shadowRoot) attachRoot(all[j].shadowRoot);
@@ -690,19 +721,37 @@
           }
           for (var j = 0; j < mutation.addedNodes.length; j++) {
             var node = mutation.addedNodes[j];
-            if (node.nodeType === 1) scanContent(node);
+            if (node.nodeType === 1) scanContent(node, true); // skip expensive shadow scan
           }
-          // Declarative shadow DOM streamed in after load: when the parser
-          // finishes a <template shadowrootmode>, it attaches the root and
-          // removes the template — this removal is the only observable trace.
-          if (config.trackShadowDom) {
-            for (var k = 0; k < mutation.removedNodes.length; k++) {
-              var removed = mutation.removedNodes[k];
-              if (removed.nodeType === 1 && removed.tagName === 'TEMPLATE' &&
-                  (removed.hasAttribute('shadowrootmode') || removed.hasAttribute('shadowroot')) &&
-                  mutation.target && mutation.target.nodeType === 1 && mutation.target.shadowRoot) {
-                attachRoot(mutation.target.shadowRoot);
+          // Clean up removed content to prevent memory leaks in SPAs
+          for (var k = 0; k < mutation.removedNodes.length; k++) {
+            var removed = mutation.removedNodes[k];
+            if (removed.nodeType !== 1) continue;
+            // Clean up tracked content state
+            if (contentStates.has(removed)) {
+              var state = contentStates.get(removed);
+              clearTimeout(state.timer);
+              if (intersectionObserver) intersectionObserver.unobserve(removed);
+              contentStates.delete(removed);
+            }
+            // Also clean up any tracked descendants
+            if (removed.querySelectorAll) {
+              var descendants = removed.querySelectorAll('[data-vane-content]');
+              for (var d = 0; d < descendants.length; d++) {
+                if (contentStates.has(descendants[d])) {
+                  var dState = contentStates.get(descendants[d]);
+                  clearTimeout(dState.timer);
+                  if (intersectionObserver) intersectionObserver.unobserve(descendants[d]);
+                  contentStates.delete(descendants[d]);
+                }
               }
+            }
+            // Declarative shadow DOM: when the parser finishes a <template shadowrootmode>,
+            // it attaches the root and removes the template
+            if (config.trackShadowDom && removed.tagName === 'TEMPLATE' &&
+                (removed.hasAttribute('shadowrootmode') || removed.hasAttribute('shadowroot')) &&
+                mutation.target && mutation.target.nodeType === 1 && mutation.target.shadowRoot) {
+              attachRoot(mutation.target.shadowRoot);
             }
           }
         }
@@ -806,7 +855,7 @@
       if (fields[i].required) required++;
     }
     return {
-      form_name: form.getAttribute('name') || form.id || 'unnamed',
+      form_name: form.getAttribute('data-vane-form') || form.getAttribute('name') || form.id || 'unnamed',
       form_action: form.getAttribute('action') || window.location.pathname,
       form_method: (form.getAttribute('method') || 'GET').toUpperCase(),
       field_count: fields.length,
@@ -828,6 +877,7 @@
     if (!field || field.nodeType !== 1 || !field.form) return;
     if (!formEngagement.has(field.form)) {
       formEngagement.set(field.form, { start: now() });
+      emit('form_engage', formProps(field.form));
     }
   }
 
@@ -878,6 +928,9 @@
       listen(document, 'focusin', onFocusIn, true);
       listen(document, 'submit', onSubmit, true);
       listen(window, 'pagehide', flushFormAbandons);
+      listen(document, 'visibilitychange', function () {
+        if (document.visibilityState === 'hidden') flushFormAbandons();
+      });
     }
     listen(document, 'keydown', touchSession, { passive: true });
     listen(window, 'scroll', touchSession, { passive: true });
@@ -943,6 +996,25 @@
     }
   }
 
+  function resetState() {
+    eventHistory = [];
+    pendingEvents = [];
+    scrollDepth = 0;
+    scrollTickPending = false;
+    vitals = {
+      first_contentful_paint: null,
+      largest_contentful_paint: null,
+      cumulative_layout_shift: null,
+      first_input_delay: null
+    };
+    pageViewId = null;
+    pageStartTime = now();
+    userId = null;
+    context = {};
+    currentUtm = null;
+    staticDevice = null;
+  }
+
   function destroy() {
     flushFormAbandons();
     contentStates.forEach(function (state) { clearTimeout(state.timer); });
@@ -958,6 +1030,7 @@
     cleanups = [];
     observedRoots = [];
     historyPatched = false;
+    resetState();
     ready = false;
     log('destroyed');
   }
@@ -989,7 +1062,8 @@
           served: state.served,
           viewed: state.viewed,
           clicked: state.clicked,
-          exposure_limit: state.exposureLimit
+          exposure_limit: state.exposureLimit,
+          scroll_depth: state.scrollDepth
         });
       });
       return out;

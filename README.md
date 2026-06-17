@@ -1,43 +1,74 @@
 # Weathervane
 
-**Tracks everything. Sends nothing.**
+**A zero-backend analytics layer for the web.**
 
-Weathervane is a ~6 KB, dependency-free JavaScript tracking layer. It watches user behavior — pageviews, content exposure, clicks, forms, sessions, web vitals — and **emits everything as structured browser `CustomEvent`s**. It makes zero network requests and sets zero cookies.
+Weathervane observes user behavior and emits structured events. It does not send data anywhere.
 
-You write the last mile. Forward events to GA4, PostHog, Mixpanel, your warehouse, a webhook — or all of them at once — with a few lines:
+*You decide where your analytics go.*
+
+Think of it as the missing client-side layer between your application and your data stack.
 
 ```js
 window.addEventListener('vane:event', (e) => {
-  console.log(e.detail.event_name, e.detail);
-  // → forward anywhere you like
+  myAnalyticsPipeline.send(e.detail);
 });
 ```
 
-## Why Weathervane?
+## Why?
 
-Most analytics scripts bundle three jobs: *what to track*, *how to structure it*, and *where to send it*. That bundling is the lock-in. Weathervane does the first two — the hard, repetitive part — and hands you the third.
+Most analytics SDKs bundle collection + storage + dashboards. Your users generate valuable behavioral data, and most tools immediately route that data into someone else's platform.
 
-- **One tracking layer, N destinations.** Instrument your site once with `data-vane-*` attributes. Forward to GA4 today, add PostHog tomorrow, swap in your warehouse next year — without touching your markup.
-- **Inspect before anything ships.** Every event is visible in the browser before *you* decide it leaves. Scrub, sample, or drop events in your forwarder. Perfect chokepoint for consent logic.
-- **No cookies, no requests, no vendor.** Weathervane itself has nothing to consent to, nothing to block, and nothing to migrate away from. IDs live in `localStorage`.
-- **Tracking quality you'd otherwise build by hand.** Cumulative, pause-aware content exposure timing; form abandonment with engagement time; SPA navigation; shadow DOM support. This is the boilerplate everyone rewrites per project, done once.
+Weathervane separates those concerns:
 
-### "Why not just use Google Tag Manager?"
+```
+Browser → Weathervane → Your pipeline
+```
+
+It's just the observation layer. No dashboards. No hosted backend. No opinionated pipeline. No vendor lock-in.
+
+- **Behavioral events, not pageviews.** Understand what users actually experience — content exposure, engagement time, clicks, form intent, navigation patterns, and more.
+- **Bring your own destination.** Forward events anywhere: your API, warehouse, analytics provider, or custom pipeline.
+- **Built for modern apps.** SPA navigation, Web Components, Shadow DOM, dynamic content, and long-lived applications are first-class concerns.
+- **Own your analytics model.** Keep your event schema under your control instead of adapting your product around someone else's dashboard.
+
+## What Weathervane Is Not
+
+- Not an analytics dashboard
+- Not a hosted tracking service
+- Not a replacement for your data warehouse
+- Not tied to a vendor
+
+Weathervane doesn't decide what your data means. It observes behavior, structures it, and hands it to you.
+
+## Comparison with Other Tools
+
+**"Why not just use Google Tag Manager?"**
 
 GTM is a tag *loader* — it injects vendor scripts and routes dataLayer pushes, but it doesn't *generate* rich behavioral events. Out of the box GTM can't tell you that a hero section was visible for 2.3 cumulative seconds, that a checkout form was abandoned after 14 seconds of engagement, or that a CTA inside a web component was clicked. Weathervane is the tracking *engine* that produces those events; GTM (or anything else) can be the router. They compose: `window.addEventListener('vane:event', e => dataLayer.push({ event: 'vane', ...e.detail }))`.
 
 ## ✨ Key Features
 
+### Content Exposure Tracking
+
+Unlike simple visibility trackers, Weathervane measures *meaningful* content exposure over time:
+
+```html
+<section data-vane-content="pricing" data-vane-type="marketing" data-vane-exposure="2000">
+```
+
+This emits `content_serve` when the element enters the DOM, then `content_view` after 2 cumulative seconds of visibility (pause-aware across tab switches and scroll-aways), plus `content_scroll_depth` showing how far users scrolled through it.
+
+### Everything Else
+
 - 🔌 **Zero backend, zero network** — events are emitted in the browser, never sent anywhere
 - 🍪 **Zero cookies** — client & session IDs in `localStorage` (in-memory fallback); nothing for a cookie banner to announce
-- 🎯 **Automatic content tracking** — serve / view / click lifecycle via `data-vane-*` attributes
-- 👁️ **Sophisticated viewport detection** — IntersectionObserver-based, cumulative & tab-switch-aware exposure timing, percentage-fill handling for content taller than the viewport
+- 👁️ **Cumulative, pause-aware exposure** — IntersectionObserver-based timing that handles tab switches, scroll-aways, and content taller than the viewport
 - 🌒 **Shadow DOM support** — tracks content, clicks, and forms inside open shadow roots (web components)
-- 🔗 **Link & form tracking** — automatic `link_click`, `form_submit`, and `form_abandon` events
+- 🔗 **Form intent tracking** — `form_engage`, `form_submit`, and `form_abandon` with engagement timing
 - 📊 **Web vitals** — FCP, LCP, CLS, and FID included on every payload
-- 📱 **SPA support** — automatic `pageview_dynamic` for pushState / replaceState / popstate / hashchange
-- 🆔 **Enterprise-grade IDs** — ULID event IDs (time-sortable), UUID v4 client / session / page-view IDs
-- 🛡️ **Lightweight & dependency-free** — one file, no build step, ~6 KB gzipped minified
+- 📱 **SPA-ready** — automatic `pageview_dynamic` for pushState / replaceState / popstate / hashchange
+- 📏 **Per-content scroll depth** — tracks how far users scroll through each content block (0-100%)
+- 🛡️ **~6 KB gzipped** — one file, no dependencies, no build step
 
 ## 🚀 Quick Start
 
@@ -248,7 +279,8 @@ Every event's `detail` has the same structure:
     "content_instance": "uuid...",
     "content_depth": 12,
     "exposure_limit": 2000,
-    "exposure_time": 2014
+    "exposure_time": 2014,
+    "content_scroll_depth": 75             // how far user scrolled through content (0-100)
   },
 
   "page":   { "url", "path", "title", "referrer", "search", "hash" },
@@ -274,13 +306,14 @@ Every event's `detail` has the same structure:
 
 **Content events**
 - `content_serve` — tracked content appeared in the DOM
-- `content_view` — content was visible long enough (cumulative, pause-aware); includes `exposure_time`
-- `content_click` — a `data-vane-content-click` element was clicked
+- `content_view` — content was visible long enough (cumulative, pause-aware); includes `exposure_time` and `content_scroll_depth`
+- `content_click` — a `data-vane-content-click` element was clicked; includes `content_scroll_depth`
 
 **Interaction events**
 - `link_click` — any `<a href>` click; includes `url`, `text`, `target`, `link_type` (web/email/phone), `is_external`
+- `form_engage` — user focused on a form field for the first time; includes form metadata
 - `form_submit` — any form submission; includes form metadata and `completion_time`
-- `form_abandon` — user engaged with a form for 3+ seconds and left without submitting (fires on `pagehide` or SPA navigation); includes `engagement_time`
+- `form_abandon` — user engaged with a form for 3+ seconds and left without submitting (fires on `pagehide`, `visibilitychange`, or SPA navigation); includes `engagement_time`
 
 **User events**
 - `user_identify` — fired by `setUserId()`
@@ -317,10 +350,11 @@ Every event's `detail` has the same structure:
 
 ### Form tracking
 
-All optional; they enrich `form_submit` / `form_abandon` events:
+All optional; they enrich `form_engage` / `form_submit` / `form_abandon` events:
 
 | Attribute | Example values |
 |---|---|
+| `data-vane-form` | `signup-form`, `checkout`, `newsletter` (form identifier) |
 | `data-vane-form-type` | `signup`, `contact`, `checkout`, `newsletter` |
 | `data-vane-form-category` | `marketing`, `support`, `sales` |
 | `data-vane-form-step` | `1`, `billing` |
@@ -330,7 +364,8 @@ All optional; they enrich `form_submit` / `form_abandon` events:
 | `data-vane-form-segment` | `free-users`, `enterprise` |
 
 ```html
-<form data-vane-form-type="checkout"
+<form data-vane-form="checkout-form"
+      data-vane-form-type="checkout"
       data-vane-form-funnel="purchase"
       data-vane-form-step="billing"
       data-vane-form-value="199.99"
@@ -338,6 +373,8 @@ All optional; they enrich `form_submit` / `form_abandon` events:
   ...
 </form>
 ```
+
+The `data-vane-form` attribute sets the form name (falls back to `name`, then `id`, then `'unnamed'`).
 
 Weathervane never reads or emits **field values** — only metadata (field count, types, required/optional counts).
 
@@ -368,7 +405,7 @@ vane.init({
   enableDynamicPageview: true,     // SPA `pageview_dynamic` events
   enableContentTracking: true,     // data-vane-content lifecycle
   enableLinkTracking: true,        // automatic link_click
-  enableFormTracking: true,        // form_submit / form_abandon
+  enableFormTracking: true,        // form_engage / form_submit / form_abandon
   enableWebVitals: true,           // FCP / LCP / CLS / FID collection
   trackShadowDom: true,            // open shadow root tracking
 
@@ -402,7 +439,7 @@ vane.init({
 | `vane.getHistory()` | Last N emitted payloads (see `historySize`) |
 | `vane.getContentState()` | Serve/view/click state of all tracked content |
 | `vane.isReady()` | Whether the SDK is initialized |
-| `vane.destroy()` | Remove all listeners/observers/instrumentation and stop tracking |
+| `vane.destroy()` | Remove all listeners/observers/instrumentation, reset all state, and stop tracking; safe to call `init()` again after |
 
 `track()` calls made before `init()` are queued and emitted once initialized, so the classic async-loader stub pattern (`window.vane = { _queue: [...] }`) also works.
 
@@ -422,6 +459,8 @@ Weathervane sets **no cookies**. All identifiers live in `localStorage`, with a 
 ## 📱 SPA Support
 
 `pushState`, `replaceState`, `popstate`, and `hashchange` are detected automatically and emit `pageview_dynamic` with a `navigation_trigger`. Each navigation regenerates the `page_view_id`, resets scroll depth and time-on-page, re-parses UTM parameters, and flushes any pending `form_abandon`.
+
+**Memory management:** When tracked content is removed from the DOM (e.g., route changes), Weathervane automatically cleans up internal state to prevent memory leaks in long-lived SPAs.
 
 To handle routing yourself:
 
@@ -463,7 +502,7 @@ Logs every emitted event to the console. Common gotchas:
 
 - **Listener attached too late?** The initial `pageview` fires on DOM ready — use `vane.on('*', cb, { replay: true })` or `vane.getHistory()` to catch up.
 - **Content not viewing?** Check the element is actually visible and meets the exposure time; tall elements need to fill 65% of the viewport.
-- **No `form_abandon`?** It requires 3+ seconds of engagement and fires on `pagehide`/SPA navigation, not on blur.
+- **No `form_abandon`?** It requires 3+ seconds of engagement and fires on `pagehide`, `visibilitychange` (tab switch), or SPA navigation — not on blur.
 - **Web component not tracked?** Only *open* shadow roots are trackable; closed roots are invisible by design.
 
 ## License
