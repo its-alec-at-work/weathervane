@@ -53,7 +53,7 @@ GTM is a tag *loader* — it injects vendor scripts and routes dataLayer pushes,
 Unlike simple visibility trackers, Weathervane measures *meaningful* content exposure over time:
 
 ```html
-<section data-vane-content="pricing" data-vane-type="marketing" data-vane-exposure="2000">
+<section data-vane-content="pricing" data-vane-content-type="marketing" data-vane-content-exposure="2000">
 ```
 
 This emits `content_serve` when the element enters the DOM, then `content_view` after 2 cumulative seconds of visibility (pause-aware across tab switches and scroll-aways), plus `content_scroll_depth` showing how far users scrolled through it.
@@ -65,10 +65,18 @@ This emits `content_serve` when the element enters the DOM, then `content_view` 
 - 👁️ **Cumulative, pause-aware exposure** — IntersectionObserver-based timing that handles tab switches, scroll-aways, and content taller than the viewport
 - 🌒 **Shadow DOM support** — tracks content, clicks, and forms inside open shadow roots (web components)
 - 🔗 **Form intent tracking** — `form_engage` on first focus, `form_submit` with completion time, `form_abandon` when users leave without submitting (3-second inactivity timer, resets on re-focus)
-- 📊 **Web vitals** — FCP, LCP, CLS, and FID included on every payload
+- 📊 **Web vitals** — FCP, LCP, CLS, and FID emitted as a standalone `web_vitals` event at page end
 - 📱 **SPA-ready** — automatic `pageview_dynamic` for pushState / replaceState / popstate / hashchange
 - 📏 **Per-content scroll depth** — tracks how far users scroll through each content block (0-100%)
-- 🛡️ **~6 KB gzipped** — one file, no dependencies, no build step
+- 🔒 **Privacy controls** — disable device/timezone collection, use session-only client IDs
+- 📉 **Sampling** — `sampleRate` for high-traffic sites; events still emit, use `isSampled()` downstream
+- 📦 **Payload modes** — `full`, `compact`, or `minimal` payload verbosity
+- 🚀 **Built-in flush** — `vane.flush(url)` sends event history via `sendBeacon`
+- 🚨 **Error tracking** — automatic capture of uncaught errors and unhandled promise rejections
+- 😤 **Rage click detection** — detects rapid repeated clicks indicating user frustration
+- ✅ **Consent API** — `setConsent('all' | 'essential' | 'none')` controls PII collection, not event types
+- 📘 **TypeScript definitions** — full `.d.ts` types included for IDE support
+- 🛡️ **~8 KB gzipped** — one file, no dependencies, no build step
 
 ## 🚀 Quick Start
 
@@ -138,8 +146,8 @@ unsubscribe(); // stop listening
 
 ```html
 <div data-vane-content="hero-banner"
-     data-vane-type="marketing"
-     data-vane-exposure="2000">
+     data-vane-content-type="marketing"
+     data-vane-content-exposure="2000">
   <h1>Welcome!</h1>
   <button data-vane-content-click="cta-primary">Get Started</button>
 </div>
@@ -232,7 +240,19 @@ window.addEventListener('vane:event', (e) => {
 });
 ```
 
-**Your own API (batched, survives page close):**
+**Your own API (using built-in flush):**
+
+```js
+// Simplest: use vane.flush() which handles sendBeacon + batching
+addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'hidden') vane.flush('/api/events');
+});
+
+// Or with periodic flushing:
+setInterval(() => vane.flush('/api/events', { clear: true }), 30000);
+```
+
+**Your own API (manual batching):**
 
 ```js
 const queue = [];
@@ -260,7 +280,7 @@ window.addEventListener('vane:form_submit', (e) => {
 
 ## 📦 Event Payload
 
-Every event's `detail` has the same structure:
+Every event's `detail` has the same structure (shown with `payloadMode: 'full'`, the default):
 
 ```jsonc
 {
@@ -289,13 +309,16 @@ Every event's `detail` has the same structure:
               "viewport_width", "viewport_height", "device_memory",
               "hardware_concurrency", "cookie_enabled", "online", "user_agent" },
   "utm":    { "utm_source", "utm_medium", "..." },  // null when absent
-  "performance": { "first_contentful_paint", "largest_contentful_paint",
-                   "cumulative_layout_shift", "first_input_delay" },
   "engagement":  { "scroll_depth": 45, "time_on_page": 12840 },
-  "context": { },                           // your vane.setContext() data
-  "sdk": { "name": "vane", "version": "1.1.0" }
+  "context": { "author": "john" },          // from setContext() + data-vane-context-* attributes
+  "sdk": { "name": "weathervane", "version": "0.8.0" }
 }
 ```
+
+**Payload modes:** Use `payloadMode` to reduce payload size:
+- `'full'` (default) — all fields as shown above
+- `'compact'` — trimmed device info (browser_name, device_type, viewport only), no sdk.name
+- `'minimal'` — just event_id, event_name, timestamp, client_id, session_id, page_view_id, properties, and page.path
 
 ## 📊 Event Types
 
@@ -303,6 +326,7 @@ Every event's `detail` has the same structure:
 - `pageview` — initial page view (fires on DOM ready); `properties` include `page_load_time`, `dom_content_loaded_time`, `navigation_type`, `connection_type`
 - `pageview_dynamic` — SPA navigation; `properties.navigation_trigger` is `pushState` / `replaceState` / `popstate` / `hashchange`
 - `session_start` — new session; `properties.reason` is `new` / `timeout` / `manual`
+- `web_vitals` — emitted once at page end (pagehide/visibilitychange); `properties` include `first_contentful_paint`, `largest_contentful_paint`, `cumulative_layout_shift`, `first_input_delay`
 
 **Content events**
 - `content_serve` — tracked content appeared in the DOM
@@ -317,6 +341,11 @@ Every event's `detail` has the same structure:
 
 **User events**
 - `user_identify` — fired by `setUserId()`
+- `consent_change` — fired by `setConsent()`; `properties` include `previous_level` and `new_level`
+
+**Error & frustration events**
+- `error` — uncaught error or unhandled promise rejection; `properties` include `error_type`, `message`, `filename`, `lineno`, `colno`, `stack`
+- `rage_click` — rapid repeated clicks on the same element; `properties` include `element_tag`, `element_id`, `element_class`, `click_count`
 
 **Custom events**
 - anything you pass to `vane.track(name, properties)`
@@ -328,21 +357,26 @@ Every event's `detail` has the same structure:
 | Attribute | Required | Description |
 |---|---|---|
 | `data-vane-content="name"` | ✅ | Marks an element for serve/view/click tracking |
-| `data-vane-type="type"` | — | Content category (`marketing`, `product`, `blog`, …) |
-| `data-vane-segment="segment"` | — | Grouping for segmented analysis |
-| `data-vane-exposure="ms"` | — | Visible time required for `content_view` (default 1000) |
+| `data-vane-content-type="type"` | — | Content category (`marketing`, `product`, `blog`, …) |
+| `data-vane-content-segment="segment"` | — | Grouping for segmented analysis |
+| `data-vane-content-exposure="ms"` | — | Visible time required for `content_view` (default 1000) |
 | `data-vane-content-click="id"` | — | Tracks clicks on elements inside (or outside) content blocks |
+| `data-vane-context-*="value"` | — | Custom metadata; `data-vane-context-author="john"` becomes `context: { author: "john" }` |
 
 ```html
 <section data-vane-content="product-showcase"
-         data-vane-type="product"
-         data-vane-segment="homepage"
-         data-vane-exposure="1500">
+         data-vane-content-type="product"
+         data-vane-content-segment="homepage"
+         data-vane-content-exposure="1500"
+         data-vane-context-author="marketing-team"
+         data-vane-context-campaign="summer-sale">
   <h2>Featured Products</h2>
   <button data-vane-content-click="product-1-buy">Buy Now</button>
   <a href="/products" data-vane-content-click="view-all">View All</a>
 </section>
 ```
+
+The `data-vane-context-*` attributes are merged into the top-level `context` object in event payloads (alongside any values set via `setContext()`), useful for AI/ML pipelines and semantic analysis.
 
 **Lifecycle:** *serve* (in DOM) → *view* (visible for the exposure time, cumulative across scroll-aways and tab switches) → *click*.
 
@@ -399,7 +433,7 @@ All options with their defaults:
 ```js
 vane.init({
   // Emission
-  eventPrefix: 'vane',          // events fire as `${prefix}:event` / `${prefix}:<name>`
+  eventPrefix: 'vane',             // events fire as `${prefix}:event` / `${prefix}:<name>`
   historySize: 100,                // events kept for on(..., { replay: true }) / getHistory()
 
   // Feature toggles
@@ -409,6 +443,8 @@ vane.init({
   enableLinkTracking: true,        // automatic link_click
   enableFormTracking: true,        // form_engage / form_submit / form_abandon
   enableWebVitals: true,           // FCP / LCP / CLS / FID collection
+  enableErrorTracking: true,       // capture uncaught errors and promise rejections
+  enableRageClickTracking: true,   // detect rapid repeated clicks
   trackShadowDom: true,            // open shadow root tracking
 
   // Session management
@@ -421,10 +457,94 @@ vane.init({
   // Form tracking
   formAbandonThreshold: 3000,      // min engagement ms before form_abandon
 
+  // Rage click detection
+  rageClickThreshold: 3,           // number of clicks to trigger rage_click
+  rageClickWindow: 1000,           // ms window for counting rapid clicks
+
+  // Consent (GDPR/CCPA) - controls PII collection, not which events fire
+  consent: 'all',                  // 'all' (full data) | 'essential' (strip PII) | 'none' (no events)
+
+  // Privacy (GDPR/CCPA friendly)
+  privacy: {
+    collectDevice: true,           // include device info in payloads
+    collectTimezone: true,         // include timezone in device info
+    persistClientId: true          // persist client ID in localStorage (false = session-only)
+  },
+
+  // Sampling
+  sampleRate: 1,                   // fraction of sessions to sample (0-1); use isSampled() to check
+
+  // Payload size
+  payloadMode: 'full',             // 'full' | 'compact' | 'minimal'
+
   // Development
   debug: false                     // console logging of every emitted event
 });
 ```
+
+### Privacy options
+
+For privacy-conscious deployments:
+
+```js
+vane.init({
+  privacy: {
+    collectDevice: false,    // omit all device info from payloads
+    collectTimezone: false,  // omit timezone specifically
+    persistClientId: false   // session-only client ID (not stored in localStorage)
+  }
+});
+```
+
+### Sampling
+
+For high-traffic sites, sample a fraction of sessions:
+
+```js
+vane.init({ sampleRate: 0.1 }); // 10% of sessions
+
+// Events still emit for ALL sessions — use isSampled() to decide what to send:
+vane.on('*', (event) => {
+  if (vane.isSampled()) {
+    sendToBackend(event);
+  }
+});
+
+// Or use flush() which respects sampling automatically:
+vane.flush('/api/events');              // only sends if sampled
+vane.flush('/api/events', { force: true }); // always sends
+```
+
+The sampling decision is made once per session and persisted in localStorage.
+
+### Consent
+
+For GDPR/CCPA compliance, consent levels control **what data is collected** (PII stripping), not which events fire:
+
+```js
+// Set initial consent level
+vane.init({ consent: 'essential' }); // or 'all' or 'none'
+
+// Change consent at runtime (e.g., after cookie banner interaction)
+vane.setConsent('all');
+
+// Check current consent level
+vane.getConsent(); // 'all' | 'essential' | 'none'
+```
+
+**Consent levels:**
+- `'all'` — full data collection (device info, persistent client ID, full URLs, UTM params)
+- `'essential'` — **events still fire**, but stripped of PII-adjacent fields:
+  - No device info (user agent, screen size, hardware, timezone)
+  - Session-only client ID (not persisted to localStorage)
+  - Sanitized URLs (path + title only, no query params, hash, or referrer)
+  - No UTM params
+  - No user_id
+- `'none'` — no events fire at all
+
+Use consent levels for legal/privacy compliance, and use the `enable*` config flags (`enableFormTracking`, `enableErrorTracking`, etc.) to control which event types fire.
+
+Changing consent emits a `consent_change` event with `previous_level` and `new_level`. When downgrading to `'essential'`, the stored client ID is cleared and a new session-only ID is generated.
 
 ## 🛠️ API Reference
 
@@ -439,6 +559,9 @@ vane.init({
 | `vane.newSession()` | Force a new session (emits `session_start`) |
 | `vane.getClientId()` / `getSessionId()` / `getPageViewId()` | Current identifiers |
 | `vane.getHistory()` | Last N emitted payloads (see `historySize`) |
+| `vane.flush(url, options?)` | Send event history via `sendBeacon`; respects sampling unless `{ force: true }` |
+| `vane.isSampled()` | Whether this session is in the sample (based on `sampleRate`) |
+| `vane.setConsent(level)` / `getConsent()` | Set/get consent level (`'all'` / `'essential'` / `'none'`); emits `consent_change` |
 | `vane.getContentState()` | Serve/view/click state of all tracked content |
 | `vane.isReady()` | Whether the SDK is initialized |
 | `vane.destroy()` | Remove all listeners/observers/instrumentation, reset all state, and stop tracking; safe to call `init()` again after |

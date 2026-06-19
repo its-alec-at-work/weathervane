@@ -1,28 +1,29 @@
 {
   "name": "weathervane",
-  "version": "0.5.0",
+  "version": "0.8.0",
   "description": "The open analytics layer that sends nothing. Zero-backend behavioral telemetry — pageviews, content exposure, clicks, forms, sessions, and web vitals emitted as structured CustomEvents you forward anywhere.",
   "author": "Alec Rothman",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/its-alec-at-work/weathervane.git"
+    "url": "git+https://github.com/its-alec-at-work/weathervane.git"
   },
-  "homepage": "https://github.com/its-alec-at-work/weathervane#readme",
+  "homepage": "https://alecatwork.com/weathervane",
   "bugs": {
     "url": "https://github.com/its-alec-at-work/weathervane/issues"
   },
   "main": "weathervane.js",
   "browser": "weathervane.js",
+  "types": "weathervane.d.ts",
   "files": [
     "weathervane.js",
     "weathervane.min.js",
     "weathervane.min.js.gz",
+    "weathervane.d.ts",
     "README.md"
   ],
   "scripts": {
-    "build": "npx terser weathervane.js --compress --mangle -o weathervane.min.js && gzip -9 -kf weathervane.min.js",
-    "demo": "python3 -m http.server 4173"
+    "build": "npx terser weathervane.js --compress --mangle -o weathervane.min.js && gzip -9 -kf weathervane.min.js"
   },
   "keywords": [
     "analytics",

@@ -1,5 +1,5 @@
 /*!
- * Weathervane v0.1.0
+ * Weathervane v0.8.0
  * A lightweight, zero-backend analytics utility.
  *
  * Weathervane does NOT send data anywhere. It observes user behavior
@@ -19,7 +19,7 @@
   if (!window || !document) return;
   if (window.vane && window.vane.__loaded) return;
 
-  var VERSION = '0.1.0';
+  var VERSION = '0.8.0';
   var existing = window.vane; // may hold a _queue from an async loader snippet
 
   // ---------------------------------------------------------------------
@@ -38,6 +38,8 @@
     enableLinkTracking: true,        // emit `link_click` for every <a href> click
     enableFormTracking: true,        // emit `form_submit` / `form_abandon`
     enableWebVitals: true,           // collect FCP / LCP / CLS / FID
+    enableErrorTracking: true,       // emit `error` for uncaught errors and promise rejections
+    enableRageClickTracking: true,   // emit `rage_click` for rapid repeated clicks
     trackShadowDom: true,            // scan open shadow roots, retarget composed events
 
     // Session management
@@ -50,6 +52,26 @@
 
     // Form tracking
     formAbandonThreshold: 3000,      // min ms of engagement before `form_abandon` fires
+
+    // Rage click detection
+    rageClickThreshold: 3,           // number of clicks in rageClickWindow to trigger
+    rageClickWindow: 1000,           // ms window for counting rapid clicks
+
+    // Privacy
+    privacy: {
+      collectDevice: true,           // include device info in payloads
+      collectTimezone: true,         // include timezone in device info
+      persistClientId: true          // persist client ID in localStorage (false = session-only)
+    },
+
+    // Consent (for GDPR/CCPA; can also use setConsent() at runtime)
+    consent: 'all',                  // 'all' | 'essential' | 'none'
+
+    // Sampling
+    sampleRate: 1,                   // fraction of sessions to sample (0-1); use isSampled() to check
+
+    // Payload size
+    payloadMode: 'full',             // 'full' | 'compact' | 'minimal'
 
     // Development
     debug: false
@@ -160,12 +182,18 @@
     try { window.localStorage.setItem(key, value); } catch (e) { /* memory fallback only */ }
   }
 
+  function storageRemove(key) {
+    delete memoryStore[key];
+    try { window.localStorage.removeItem(key); } catch (e) { /* unavailable */ }
+  }
+
   // ---------------------------------------------------------------------
   // Identity & session
   // ---------------------------------------------------------------------
 
   var CID_KEY = 'vane_cid';
   var SID_KEY = 'vane_sid';
+  var SAMPLE_KEY = 'vane_sampled';
 
   var clientId = null;
   var session = { id: null, lastActive: 0, lastPersist: 0 };
@@ -173,11 +201,44 @@
   var pageViewId = null;
   var pageStartTime = now();
   var context = {};
+  var sampled = true;  // whether this session should emit events
+  var consentLevel = 'all'; // 'all' | 'essential' | 'none'
+
+  // Consent levels control what DATA is collected (PII stripping), not which events fire:
+  // 'all'       - full data collection (device info, persistent ID, full URLs, UTM)
+  // 'essential' - events still fire, but stripped of PII-adjacent fields:
+  //               no device info, session-only client ID, sanitized URLs (no search/hash), no UTM
+  // 'none'      - no events fire at all
 
   function loadClientId() {
-    clientId = storageGet(CID_KEY);
-    if (!clientId) clientId = uuid();
-    storageSet(CID_KEY, clientId);
+    // Consent 'essential' forces session-only client ID (no persistence)
+    var shouldPersist = config.privacy.persistClientId && consentLevel !== 'essential';
+    if (shouldPersist) {
+      clientId = storageGet(CID_KEY);
+      if (!clientId) clientId = uuid();
+      storageSet(CID_KEY, clientId);
+    } else {
+      // Session-only client ID (not persisted)
+      clientId = uuid();
+    }
+  }
+
+  function checkSampling() {
+    if (config.sampleRate >= 1) {
+      sampled = true;
+      return;
+    }
+    if (config.sampleRate <= 0) {
+      sampled = false;
+      return;
+    }
+    // Check if we already decided for this session
+    var stored = storageGet(SAMPLE_KEY);
+    if (stored === '1') { sampled = true; return; }
+    if (stored === '0') { sampled = false; return; }
+    // Decide based on sampleRate
+    sampled = Math.random() < config.sampleRate;
+    storageSet(SAMPLE_KEY, sampled ? '1' : '0');
   }
 
   function persistSession() {
@@ -257,11 +318,16 @@
 
   var staticDevice = null;
   function deviceContext() {
+    if (!config.privacy.collectDevice) {
+      return null;
+    }
     if (!staticDevice) {
       var ua = navigator.userAgent || '';
       var browser = parseBrowser(ua);
       var timezone = null;
-      try { timezone = Intl.DateTimeFormat().resolvedOptions().timeZone; } catch (e) { /* no Intl */ }
+      if (config.privacy.collectTimezone) {
+        try { timezone = Intl.DateTimeFormat().resolvedOptions().timeZone; } catch (e) { /* no Intl */ }
+      }
       staticDevice = {
         user_agent: ua,
         browser_name: browser.name,
@@ -300,6 +366,7 @@
 
   function navTiming() {
     try {
+      if (typeof performance === 'undefined' || !performance.getEntriesByType) return {};
       var nav = performance.getEntriesByType('navigation')[0];
       if (!nav) return {};
       return {
@@ -330,6 +397,7 @@
     first_input_delay: null
   };
   var vitalsObservers = [];
+  var vitalsFlushed = false;
 
   function observeVitals() {
     if (!config.enableWebVitals || typeof PerformanceObserver === 'undefined') return;
@@ -371,6 +439,58 @@
     });
   }
 
+  function flushVitals() {
+    if (!config.enableWebVitals || vitalsFlushed) return;
+    // Check if we have any vitals to report
+    var hasVitals = vitals.first_contentful_paint !== null ||
+                    vitals.largest_contentful_paint !== null ||
+                    vitals.cumulative_layout_shift !== null ||
+                    vitals.first_input_delay !== null;
+    if (!hasVitals) return;
+    vitalsFlushed = true;
+    emit('web_vitals', assign({}, vitals));
+  }
+
+  // ---------------------------------------------------------------------
+  // Error tracking
+  // ---------------------------------------------------------------------
+
+  function setupErrorTracking() {
+    if (!config.enableErrorTracking) return;
+
+    // Global error handler
+    listen(window, 'error', function (e) {
+      emit('error', {
+        error_type: 'uncaught',
+        message: e.message || 'Unknown error',
+        filename: e.filename || null,
+        lineno: e.lineno || null,
+        colno: e.colno || null,
+        stack: e.error && e.error.stack ? truncate(e.error.stack, 1000) : null
+      });
+    });
+
+    // Unhandled promise rejection handler
+    listen(window, 'unhandledrejection', function (e) {
+      var reason = e.reason;
+      var message = 'Unhandled promise rejection';
+      var stack = null;
+      if (reason) {
+        if (typeof reason === 'string') {
+          message = reason;
+        } else if (reason.message) {
+          message = reason.message;
+          stack = reason.stack ? truncate(reason.stack, 1000) : null;
+        }
+      }
+      emit('error', {
+        error_type: 'unhandled_rejection',
+        message: message,
+        stack: stack
+      });
+    });
+  }
+
   // ---------------------------------------------------------------------
   // Scroll depth
   // ---------------------------------------------------------------------
@@ -406,6 +526,67 @@
   var pendingEvents = []; // track() calls made before init()
 
   function buildPayload(eventName, properties) {
+    var mode = config.payloadMode;
+    var isEssential = consentLevel === 'essential';
+
+    // When consent is 'essential', strip PII-adjacent fields:
+    // - No device info
+    // - No UTM params
+    // - Sanitized page (path + title only, no search/hash/referrer/full URL)
+    // - No user_id
+    var essentialPage = isEssential ? {
+      path: window.location.pathname,
+      title: document.title || null
+    } : null;
+
+    // Minimal: just essentials for high-volume scenarios
+    if (mode === 'minimal') {
+      return {
+        event_id: sortableId(),
+        event_name: eventName,
+        timestamp: new Date().toISOString(),
+        client_id: clientId,
+        session_id: session.id,
+        page_view_id: pageViewId,
+        properties: properties || {},
+        page: { path: window.location.pathname }
+      };
+    }
+
+    // Compact: trimmed versions of each section
+    if (mode === 'compact') {
+      var device = isEssential ? null : deviceContext();
+      return {
+        event_id: sortableId(),
+        event_name: eventName,
+        timestamp: new Date().toISOString(),
+        client_id: clientId,
+        session_id: session.id,
+        page_view_id: pageViewId,
+        user_id: isEssential ? null : userId,
+        properties: properties || {},
+        page: essentialPage || {
+          url: window.location.href,
+          path: window.location.pathname,
+          title: document.title || null
+        },
+        device: device ? {
+          browser_name: device.browser_name,
+          device_type: device.device_type,
+          viewport_width: device.viewport_width,
+          viewport_height: device.viewport_height
+        } : null,
+        utm: isEssential ? null : currentUtm,
+        engagement: {
+          scroll_depth: scrollDepth,
+          time_on_page: now() - pageStartTime
+        },
+        context: assign({}, context),
+        sdk: { version: VERSION }
+      };
+    }
+
+    // Full: everything (default)
     return {
       event_id: sortableId(),
       event_name: eventName,
@@ -413,12 +594,11 @@
       client_id: clientId,
       session_id: session.id,
       page_view_id: pageViewId,
-      user_id: userId,
+      user_id: isEssential ? null : userId,
       properties: properties || {},
-      page: pageContext(),
-      device: deviceContext(),
-      utm: currentUtm,
-      performance: assign({}, vitals),
+      page: essentialPage || pageContext(),
+      device: isEssential ? null : deviceContext(),
+      utm: isEssential ? null : currentUtm,
       engagement: {
         scroll_depth: scrollDepth,
         time_on_page: now() - pageStartTime
@@ -436,15 +616,28 @@
       event = document.createEvent('CustomEvent');
       event.initCustomEvent(type, false, false, payload);
     }
-    window.dispatchEvent(event);
+    try {
+      window.dispatchEvent(event);
+    } catch (e) {
+      // A throwing listener should not break internal tracking
+      if (config.debug) console.error('vane: listener threw', e);
+    }
   }
 
-  function emit(eventName, properties) {
+  function emit(eventName, properties, eventContext) {
+    // Consent 'none' blocks all events
+    if (consentLevel === 'none') {
+      return null;
+    }
     if (!ready) {
-      pendingEvents.push([eventName, properties]);
+      pendingEvents.push([eventName, properties, eventContext]);
       return null;
     }
     var payload = buildPayload(eventName, properties);
+    // Merge event-specific context (e.g., from data-vane-context-* attributes)
+    if (eventContext) {
+      payload.context = assign(payload.context || {}, eventContext);
+    }
     eventHistory.push(payload);
     if (eventHistory.length > config.historySize) {
       eventHistory.splice(0, eventHistory.length - config.historySize);
@@ -475,7 +668,17 @@
     lastUrl = window.location.href;
     touchSession();
     flushFormAbandons();
+    // Flush vitals for previous page before starting new page view
+    flushVitals();
     if (!config.enableDynamicPageview) return;
+    // Reset vitals and flag for the new page
+    vitals = {
+      first_contentful_paint: null,
+      largest_contentful_paint: null,
+      cumulative_layout_shift: null,
+      first_input_delay: null
+    };
+    vitalsFlushed = false;
     var props = { navigation_trigger: trigger };
     if (trigger === 'hashchange') props.new_hash = window.location.hash || null;
     startPageView('pageview_dynamic', props);
@@ -502,6 +705,7 @@
   // ---------------------------------------------------------------------
 
   var contentStates = new Map();
+  var visibleContent = new Set(); // Tracks currently visible content for efficient scroll updates
   var intersectionObserver = null;
   var mutationObserver = null;
 
@@ -510,6 +714,25 @@
     if (!total) return 0;
     var top = el.getBoundingClientRect().top + window.scrollY;
     return Math.max(0, Math.min(100, Math.round((top / total) * 100)));
+  }
+
+  // Parse data-vane-context-* attributes into a context object
+  // e.g. data-vane-context-author="john" becomes { author: "john" }
+  function parseContentContext(el) {
+    var ctx = null;
+    var attrs = el.attributes;
+    var prefix = 'data-vane-context-';
+    for (var i = 0; i < attrs.length; i++) {
+      var attr = attrs[i];
+      if (attr.name.indexOf(prefix) === 0) {
+        var key = attr.name.slice(prefix.length);
+        if (key) {
+          if (!ctx) ctx = {};
+          ctx[key] = attr.value;
+        }
+      }
+    }
+    return ctx;
   }
 
   function contentProps(el, state) {
@@ -540,7 +763,10 @@
   }
 
   function updateContentScrollDepths() {
-    contentStates.forEach(function (state, el) {
+    // Only update scroll depths for currently visible content (O(visible) vs O(all))
+    visibleContent.forEach(function (el) {
+      var state = contentStates.get(el);
+      if (!state) return;
       var depth = calcContentScrollDepth(el);
       if (depth > state.scrollDepth) state.scrollDepth = depth;
     });
@@ -575,9 +801,9 @@
     if (!name) return;
     var state = {
       name: name,
-      type: el.getAttribute('data-vane-type') || null,
-      segment: el.getAttribute('data-vane-segment') || null,
-      exposureLimit: parseInt(el.getAttribute('data-vane-exposure'), 10) || config.contentExposureLimit,
+      type: el.getAttribute('data-vane-content-type') || null,
+      segment: el.getAttribute('data-vane-content-segment') || null,
+      exposureLimit: parseInt(el.getAttribute('data-vane-content-exposure'), 10) || config.contentExposureLimit,
       instanceId: uuid(),
       served: true,
       viewed: false,
@@ -589,12 +815,13 @@
       scrollDepth: 0 // max scroll depth within this content (0-100)
     };
     contentStates.set(el, state);
-    emit('content_serve', contentProps(el, state));
+    emit('content_serve', contentProps(el, state), parseContentContext(el));
     if (intersectionObserver) intersectionObserver.observe(el);
   }
 
-  // scanContent: skipShadowScan=true for mutation-triggered scans since
-  // attachShadow patch + template removal watcher already catch new roots
+  // scanContent: scans a subtree for content elements and shadow roots.
+  // skipShadowScan=true can be used when shadow roots are known to be
+  // caught by other mechanisms (rarely needed).
   function scanContent(root, skipShadowScan) {
     if (!root) root = document;
     if (root.nodeType === 1) {
@@ -658,8 +885,8 @@
     if (!entry.isIntersecting) return false;
     var rect = entry.boundingClientRect;
     // Standard elements must be (essentially) fully visible. Elements taller
-    // than the viewport count as visible once they fill enough of it.
-    if (rect.height <= viewportHeight) return entry.intersectionRatio >= 0.98;
+    // than or equal to the viewport count as visible once they fill enough of it.
+    if (rect.height < viewportHeight) return entry.intersectionRatio >= 0.98;
     return entry.intersectionRect.height >= viewportHeight * config.largeContentViewportFill;
   }
 
@@ -669,10 +896,11 @@
     state.timer = setTimeout(function () {
       if (state.viewed || state.visibleSince === null) return;
       state.viewed = true;
+      visibleContent.delete(el); // No longer need scroll tracking
       var exposure = state.accumulated + (now() - state.visibleSince);
       emit('content_view', assign(contentProps(el, state), {
         exposure_time: Math.round(exposure)
-      }));
+      }), parseContentContext(el));
       if (intersectionObserver) intersectionObserver.unobserve(el);
     }, remaining);
   }
@@ -689,13 +917,16 @@
     var viewportHeight = window.innerHeight;
     for (var i = 0; i < entries.length; i++) {
       var entry = entries[i];
-      var state = contentStates.get(entry.target);
+      var el = entry.target;
+      var state = contentStates.get(el);
       if (!state || state.viewed) continue;
       var visible = isContentVisible(entry, viewportHeight);
       if (visible && state.visibleSince === null) {
         state.visibleSince = now();
-        scheduleViewTimer(entry.target, state);
+        visibleContent.add(el);
+        scheduleViewTimer(el, state);
       } else if (!visible && state.visibleSince !== null) {
+        visibleContent.delete(el);
         pauseContent(state);
       }
     }
@@ -721,7 +952,9 @@
           }
           for (var j = 0; j < mutation.addedNodes.length; j++) {
             var node = mutation.addedNodes[j];
-            if (node.nodeType === 1) scanContent(node, true); // skip expensive shadow scan
+            // Full shadow scan needed: setHTMLUnsafe with declarative shadow DOM
+            // creates roots instantly without attachShadow or template removal
+            if (node.nodeType === 1) scanContent(node, false);
           }
           // Clean up removed content to prevent memory leaks in SPAs
           for (var k = 0; k < mutation.removedNodes.length; k++) {
@@ -733,6 +966,7 @@
               clearTimeout(state.timer);
               if (intersectionObserver) intersectionObserver.unobserve(removed);
               contentStates.delete(removed);
+              visibleContent.delete(removed);
             }
             // Also clean up any tracked descendants
             if (removed.querySelectorAll) {
@@ -743,6 +977,7 @@
                   clearTimeout(dState.timer);
                   if (intersectionObserver) intersectionObserver.unobserve(descendants[d]);
                   contentStates.delete(descendants[d]);
+                  visibleContent.delete(descendants[d]);
                 }
               }
             }
@@ -784,8 +1019,50 @@
   }
 
   // ---------------------------------------------------------------------
-  // Click tracking (content clicks + links)
+  // Click tracking (content clicks + links + rage clicks)
   // ---------------------------------------------------------------------
+
+  // Rage click detection state
+  var rageClickState = {
+    element: null,
+    clicks: [],
+    emitted: false
+  };
+
+  function checkRageClick(e, target) {
+    if (!config.enableRageClickTracking) return;
+
+    var t = now();
+    var isSameElement = rageClickState.element === target;
+
+    if (!isSameElement) {
+      // New element, reset state
+      rageClickState.element = target;
+      rageClickState.clicks = [t];
+      rageClickState.emitted = false;
+      return;
+    }
+
+    // Same element, add click and filter old clicks
+    rageClickState.clicks.push(t);
+    rageClickState.clicks = rageClickState.clicks.filter(function (ts) {
+      return t - ts < config.rageClickWindow;
+    });
+
+    // Check if threshold met
+    if (!rageClickState.emitted && rageClickState.clicks.length >= config.rageClickThreshold) {
+      rageClickState.emitted = true;
+      var tag = target.tagName ? target.tagName.toLowerCase() : 'unknown';
+      emit('rage_click', {
+        element_tag: tag,
+        element_id: target.id || null,
+        element_class: target.className || null,
+        element_text: truncate(target.innerText || target.textContent, 100) || null,
+        click_count: rageClickState.clicks.length,
+        window_ms: config.rageClickWindow
+      });
+    }
+  }
 
   function linkType(href) {
     if (/^mailto:/i.test(href)) return 'email';
@@ -797,6 +1074,10 @@
     var path = eventPath(e);
     if (!path.length) return;
     touchSession();
+
+    // Rage click detection
+    var target = path[0];
+    checkRageClick(e, target);
 
     if (config.enableContentTracking) {
       var clickHit = findInPath(path, 0, function (el) {
@@ -816,7 +1097,7 @@
           element_text: truncate(clickEl.innerText || clickEl.textContent, 100) || null
         };
         if (container && state) assign(props, contentProps(container, state));
-        emit('content_click', props);
+        emit('content_click', props, container ? parseContentContext(container) : null);
       }
     }
 
@@ -847,13 +1128,13 @@
 
   function formProps(form) {
     var fields = form.querySelectorAll('input, select, textarea');
-    var fieldTypes = [];
+    var typeSet = new Set();
     var required = 0;
     for (var i = 0; i < fields.length; i++) {
-      var type = fields[i].type || fields[i].tagName.toLowerCase();
-      if (fieldTypes.indexOf(type) === -1) fieldTypes.push(type);
+      typeSet.add(fields[i].type || fields[i].tagName.toLowerCase());
       if (fields[i].required) required++;
     }
+    var fieldTypes = Array.from(typeSet);
     return {
       form_name: form.getAttribute('data-vane-form') || form.getAttribute('name') || form.id || 'unnamed',
       form_action: form.getAttribute('action') || window.location.pathname,
@@ -949,13 +1230,27 @@
       log('init() called twice — ignoring');
       return api;
     }
-    assign(config, options || {});
+    options = options || {};
+    // Deep merge privacy object
+    if (options.privacy) {
+      options.privacy = assign({}, DEFAULTS.privacy, options.privacy);
+    }
+    assign(config, options);
     ready = true;
+
+    checkSampling();
+    if (!sampled) {
+      log('session not sampled (sampleRate:', config.sampleRate + ') — events still emit, use isSampled() to filter');
+    }
+
+    // Initialize consent level from config
+    consentLevel = config.consent || 'all';
 
     loadClientId();
     currentUtm = parseUtm();
     observeVitals();
     observeScroll();
+    setupErrorTracking();
     loadSession(); // may emit session_start
 
     if (config.enableDynamicPageview) patchHistory();
@@ -973,6 +1268,23 @@
     listen(window, 'scroll', touchSession, { passive: true });
     listen(window, 'pagehide', persistSession);
 
+    // Emit web vitals after page stabilizes (load + 1s delay for LCP to finalize)
+    // Also flush on page end as fallback for late CLS values
+    if (config.enableWebVitals) {
+      var emitInitialVitals = function () {
+        setTimeout(flushVitals, 1000);
+      };
+      if (document.readyState === 'complete') {
+        emitInitialVitals();
+      } else {
+        listen(window, 'load', emitInitialVitals);
+      }
+    }
+    listen(window, 'pagehide', flushVitals);
+    listen(document, 'visibilitychange', function () {
+      if (document.visibilityState === 'hidden') flushVitals();
+    });
+
     whenDomReady(function () {
       if (config.enableAutoPageview) {
         startPageView('pageview', assign({ navigation_trigger: 'initial' }, navTiming(), connectionInfo()));
@@ -984,7 +1296,7 @@
 
     // Replay anything tracked before init
     var queued = pendingEvents.splice(0);
-    for (var i = 0; i < queued.length; i++) emit(queued[i][0], queued[i][1]);
+    for (var i = 0; i < queued.length; i++) emit(queued[i][0], queued[i][1], queued[i][2]);
 
     log('initialized', config);
     return api;
@@ -1044,18 +1356,70 @@
       cumulative_layout_shift: null,
       first_input_delay: null
     };
+    vitalsFlushed = false;
     pageViewId = null;
     pageStartTime = now();
     userId = null;
     context = {};
     currentUtm = null;
     staticDevice = null;
+    rageClickState = { element: null, clicks: [], emitted: false };
+    consentLevel = 'all';
+  }
+
+  function flush(url, options) {
+    options = options || {};
+    // Respect sampling unless force: true
+    if (!sampled && !options.force) {
+      log('flush: skipped (session not sampled, use force: true to override)');
+      return false;
+    }
+    var events = eventHistory.slice();
+    if (!events.length) {
+      log('flush: no events to send');
+      return false;
+    }
+    var payload = JSON.stringify({
+      client_id: clientId,
+      session_id: session.id,
+      flushed_at: new Date().toISOString(),
+      event_count: events.length,
+      events: events
+    });
+    var sent = false;
+    if (navigator.sendBeacon) {
+      try {
+        sent = navigator.sendBeacon(url, new Blob([payload], { type: 'application/json' }));
+      } catch (e) {
+        log('flush: sendBeacon failed', e);
+      }
+    }
+    // Fallback to fetch if sendBeacon unavailable or failed
+    if (!sent && typeof fetch !== 'undefined') {
+      try {
+        fetch(url, {
+          method: 'POST',
+          body: payload,
+          headers: { 'Content-Type': 'application/json' },
+          keepalive: true
+        }).catch(function () { /* ignore network errors */ });
+        sent = true;
+      } catch (e) {
+        log('flush: fetch failed', e);
+      }
+    }
+    if (sent && options.clear !== false) {
+      eventHistory = [];
+    }
+    log('flush:', sent ? 'sent' : 'failed', events.length, 'events to', url);
+    return sent;
   }
 
   function destroy() {
     flushFormAbandons();
     contentStates.forEach(function (state) { clearTimeout(state.timer); });
     contentStates.clear();
+    visibleContent.clear();
     formEngagement.clear();
     vitalsObservers.forEach(function (observer) {
       try { observer.disconnect(); } catch (e) { /* already disconnected */ }
@@ -1070,6 +1434,32 @@
     resetState();
     ready = false;
     log('destroyed');
+  }
+
+  function setConsent(level) {
+    var validLevels = ['all', 'essential', 'none'];
+    if (validLevels.indexOf(level) === -1) {
+      log('setConsent: invalid level "' + level + '", use "all", "essential", or "none"');
+      return;
+    }
+    var previous = consentLevel;
+    consentLevel = level;
+    if (previous !== level) {
+      // Handle client ID persistence changes
+      if (level === 'essential' && previous !== 'essential') {
+        // Downgrade: clear stored client ID, generate new session-only ID
+        storageRemove(CID_KEY);
+        clientId = uuid();
+      } else if (level === 'all' && previous === 'essential' && config.privacy.persistClientId) {
+        // Upgrade: persist current client ID
+        storageSet(CID_KEY, clientId);
+      }
+      emit('consent_change', {
+        previous_level: previous,
+        new_level: level
+      });
+      log('consent changed:', previous, '→', level);
+    }
   }
 
   var api = {
@@ -1089,6 +1479,7 @@
     getSessionId: function () { return session.id; },
     getPageViewId: function () { return pageViewId; },
     getHistory: function () { return eventHistory.slice(); },
+    flush: flush,
     getContentState: function () {
       var out = [];
       contentStates.forEach(function (state) {
@@ -1106,6 +1497,9 @@
       return out;
     },
     isReady: function () { return ready; },
+    isSampled: function () { return sampled; },
+    setConsent: setConsent,
+    getConsent: function () { return consentLevel; },
     destroy: destroy
   };
 
