@@ -78,7 +78,7 @@ Destinations become a deployment detail.
 
 ## ✨ Key Features
 
-Weathervane automatically tracks key events, and make others easy to implement through `data-vane-*` attribute tagging:
+Weathervane automatically tracks key events, and makes others easy to implement through `data-vane-*` attribute tagging:
 
 | Event         | Purpose                     |
 | ------------- | --------------------------- |
