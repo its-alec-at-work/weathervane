@@ -1,18 +1,40 @@
 # Weathervane
 
-**A zero-backend analytics layer for the web.**
+**Behavioral analytics without a vendor.**
 
-Weathervane observes user behavior and emits structured events. It does not send data anywhere.
+Weathervane watches what users actually do in your application and emits structured events directly in the browser.
 
-*You decide where your analytics go.*
+No backend.
+No dashboards.
+No network requests.
+No vendor lock-in.
 
-Think of it as the missing client-side layer between your application and your data stack.
+Forward the data anywhere—or nowhere.
 
 ```js
 window.addEventListener('vane:event', (e) => {
   myAnalyticsPipeline.send(e.detail);
 });
 ```
+
+*You decide where your analytics go.*
+
+Think of Weathervane as the analytics collection layer that modern web applications are missing.
+
+## Who Is This For?
+
+Weathervane is for teams that want analytics ownership.
+
+It's a good fit if you:
+
+- Send data to your own warehouse
+- Already use Segment, RudderStack, PostHog, Amplitude, GA4, or GTM
+- Need richer behavioral signals than pageviews
+- Care about privacy and consent
+- Build SPAs, web components, or complex frontends
+- Want analytics that survives vendor changes
+
+It's probably not a good fit if you just want a dashboard tomorrow and don't care how the data gets there.
 
 ## Why?
 
@@ -40,13 +62,37 @@ It's just the observation layer. No dashboards. No hosted backend. No opinionate
 
 Weathervane doesn't decide what your data means. It observes behavior, structures it, and hands it to you.
 
-## Comparison with Other Tools
+## Why I Built It
 
-**"Why not just use Google Tag Manager?"**
+After years of implementing analytics by hand across different products, I noticed the same pattern:
 
-GTM is a tag *loader* — it injects vendor scripts and routes dataLayer pushes, but it doesn't *generate* rich behavioral events. Out of the box GTM can't tell you that a hero section was visible for 2.3 cumulative seconds, that a checkout form was abandoned after 14 seconds of engagement, or that a CTA inside a web component was clicked. Weathervane is the tracking *engine* that produces those events; GTM (or anything else) can be the router. They compose: `window.addEventListener('vane:event', e => dataLayer.push({ event: 'vane', ...e.detail }))`.
+- tracking logic was duplicated
+- vendor SDKs leaked into application code
+- switching tools was painful
+- behavioral events were inconsistent
+
+Weathervane extracts the collection layer into a small standalone library.
+
+Applications emit behavior once.
+Destinations become a deployment detail.
 
 ## ✨ Key Features
+
+Weathervane automatically tracks key events, and make others easy to implement through `data-vane-*` attribute tagging:
+
+| Event         | Purpose                     |
+| ------------- | --------------------------- |
+| pageview      | Page navigation             |
+| content_view  | Meaningful content exposure |
+| content_click | Content interaction         |
+| form_engage   | Form intent                 |
+| form_submit   | Form completion             |
+| form_abandon  | Form abandonment            |
+| rage_click    | Frustration signal          |
+| web_vitals    | Performance metrics         |
+| error         | Runtime issues              |
+
+and even more.
 
 ### Content Exposure Tracking
 
@@ -609,6 +655,11 @@ console next to a full test matrix:
 
 Each block lists the events it should emit, so you can verify behavior against expectations:
 
+## Comparison with Other Tools
+
+**"Why not just use Google Tag Manager?"**
+
+GTM is a tag *loader* — it injects vendor scripts and routes dataLayer pushes, but it doesn't *generate* rich behavioral events. Out of the box GTM can't tell you that a hero section was visible for 2.3 cumulative seconds, that a checkout form was abandoned after 14 seconds of engagement, or that a CTA inside a web component was clicked. Weathervane is the tracking *engine* that produces those events; GTM (or anything else) can be the router. They compose: `window.addEventListener('vane:event', e => dataLayer.push({ event: 'vane', ...e.detail }))`.
 
 ## 🌐 Browser Support
 
